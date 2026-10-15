@@ -15,7 +15,11 @@ npx @alanwalk/codex-until quota  # 查询一次额度
 npx @alanwalk/codex-until logs   # 查看日志
 ```
 
+`status` 输出一次当前状态面板，不显示操作菜单；未运行时只显示标题和“未启动”。
+
 面板显示剩余额度、下次重置时间和查询倒计时。上下键选择操作，左右键切换刷新间隔：`10s / 30s / 1m / 5m`，默认 `1m`。
+
+每次打开面板会主动刷新一次，返回前显示等待，不展示上次额度。已有查询会复用，限流退避期间仍按要求等待。`status` 只查看现有状态，不触发刷新。
 
 - **转入后台**：关闭面板，继续监控。也可按 `b`。
 - **停止并退出**：停止监控，保留 Codex 会话。也可按 `q` 或 `Ctrl+C`。
@@ -34,5 +38,7 @@ npx @alanwalk/codex-until logs   # 查看日志
 
 日志位置：
 
-- Windows：`%LOCALAPPDATA%\codex-quota-guard\monitor.log`
-- macOS / Linux：`~/.codex-until/monitor.log`
+- Windows：`%LOCALAPPDATA%/.cache/codex-until/`
+- macOS / Linux：`~/.cache/codex-until/`
+
+每次启动单独创建日志，按本地启动时间命名，例如 `codex-until-2026-10-15_16-50-30-123.log`。`logs` 查看当前监控日志；未运行时查看最近一次日志。

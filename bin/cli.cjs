@@ -2,8 +2,8 @@
 const net = require('node:net');
 const path = require('node:path');
 const fs = require('node:fs');
-const { runtimePaths } = require('../platform.cjs');
-const { consoleMode } = require('./terminal.cjs');
+const { runtimePaths, latestLog } = require('../platform.cjs');
+const { consoleMode, renderPanel, monitorLines } = require('./terminal.cjs');
 const { spawn } = require('node:child_process');
 const watch = require('../watch-codex-quota.cjs');
 const { address: pipe, windows } = runtimePaths();
@@ -38,11 +38,14 @@ async function daemon() {
     socket.on('error', () => {});
     socket.once('data', data => {
       const action = data.toString().trim();
+      let requiredSequence;
+      if (action === 'refresh') requiredSequence = watch.requestRefresh();
       if (action.startsWith('interval:')) {
         try { watch.setIntervalMs(Number(action.slice('interval:'.length))); }
         catch (error) { socket.end(JSON.stringify({ error: error.message }) + '\n'); return; }
       }
-      const result = { running: action !== 'stop', pid: process.pid, logPath: watch.logPath, ...watch.polling };
+      const result = { running: action !== 'stop', pid: process.pid, logPath: watch.logPath,
+        ...watch.polling, requiredSequence };
       socket.end(JSON.stringify(result) + '\n', () => {
         if (action === 'stop') process.exit(0);
       });
@@ -101,7 +104,7 @@ Non-interactive invocations run in the background.
   start   Start polling every 60 seconds; repeated calls are safe.
           --background / -b: start directly in the background.
   stop    Stop monitoring only. Codex sessions remain running.
-  status  Print monitor status as JSON.
+  status  Show the current status panel once, without a menu.
   quota   Query quota once without enabling monitoring.
   logs    Print the last 50 log lines.
 Reset detection stops ALL local Codex processes and their children.
@@ -111,12 +114,19 @@ Restarting the monitor establishes a fresh baseline. No baseline is persisted.`)
   if (action === '--daemon') return daemon();
   if (action === 'quota') return watch.main(true);
   if (action === 'logs') {
-    if (!fs.existsSync(watch.logPath)) return console.log('No logs yet.');
-    return console.log(fs.readFileSync(watch.logPath, 'utf8').trimEnd().split('\n').slice(-50).join('\n'));
+    const current = await status();
+    const logPath = current.running ? current.logPath : latestLog(runtimePaths().logDirectory);
+    if (!logPath || !fs.existsSync(logPath)) return console.log('No logs yet.');
+    return console.log(fs.readFileSync(logPath, 'utf8').trimEnd().split('\n').slice(-50).join('\n'));
   }
   if (!['start', 'stop', 'status'].includes(action)) throw new Error(`Unknown command: ${action}. Use --help.`);
   const before = await status();
-  if (action === 'status') return console.log(JSON.stringify(before));
+  if (action === 'status') {
+    const lines = before.running ? monitorLines(before, watch.logPath) : [];
+    console.log(renderPanel({ ...before, lines, showMenu: false,
+      columns: process.stdout.columns || 80, color: Boolean(process.stdout.isTTY && !process.env.NO_COLOR) }));
+    return;
+  }
   if (action === 'stop') {
     const result = before.running ? await request('stop') : before;
     console.log(JSON.stringify({ ...result, changed: before.running }));
@@ -124,13 +134,17 @@ Restarting the monitor establishes a fresh baseline. No baseline is persisted.`)
   }
   if (before.running) {
     if (foreground) await consoleMode({ status, request, logPath: watch.logPath });
-    else console.log(JSON.stringify({ ...before, changed: false }));
+    else {
+      const refreshed = await request('refresh');
+      console.log(JSON.stringify({ ...refreshed, quota: null, changed: false }));
+    }
     return;
   }
   fs.mkdirSync(path.dirname(watch.logPath), { recursive: true });
   const output = fs.openSync(watch.logPath, 'a');
   const child = spawn(process.execPath, [__filename, '--daemon'], {
     detached: true, windowsHide: true, stdio: ['ignore', 'ignore', output],
+    env: { ...process.env, CODEX_UNTIL_LOG_PATH: watch.logPath },
   });
   fs.closeSync(output);
   child.on('error', error => { console.error(error.message); process.exitCode = 1; });

@@ -3,14 +3,25 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
+function logFileName(startedAt = new Date()) {
+  const pad = (value, width = 2) => String(value).padStart(width, '0');
+  return `codex-until-${startedAt.getFullYear()}-${pad(startedAt.getMonth() + 1)}-${pad(startedAt.getDate())}_${pad(startedAt.getHours())}-${pad(startedAt.getMinutes())}-${pad(startedAt.getSeconds())}-${pad(startedAt.getMilliseconds(), 3)}.log`;
+}
+
+function latestLog(logDirectory) {
+  if (!fs.existsSync(logDirectory)) return null;
+  const names = fs.readdirSync(logDirectory).filter(name => /^codex-until-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}\.log$/.test(name)).sort();
+  return names.length ? path.join(logDirectory, names.at(-1)) : null;
+}
+
 function runtimePaths(platform = process.platform, env = process.env, home = os.homedir()) {
   const windows = platform === 'win32';
   const key = crypto.createHash('sha256').update(home).digest('hex').slice(0, 16);
   const desktopCli = windows
     ? path.join(env.LOCALAPPDATA || '', 'Programs/OpenAI/Codex/bin/codex.exe')
     : '/Applications/Codex.app/Contents/Resources/codex';
-  const logDirectory = windows ? path.join(env.LOCALAPPDATA || home, 'codex-quota-guard')
-    : path.join(home, '.codex-until');
+  const cacheRoot = windows ? env.LOCALAPPDATA || home : home;
+  const logDirectory = path.join(cacheRoot, '.cache', 'codex-until');
   let cli = env.CODEX_QUOTA_CLI;
   if (!cli) {
     if (fs.existsSync(desktopCli)) cli = desktopCli;
@@ -20,7 +31,8 @@ function runtimePaths(platform = process.platform, env = process.env, home = os.
   return {
     windows,
     address: windows ? `\\\\.\\pipe\\codex-quota-guard-${key}` : path.join(os.tmpdir(), `codex-until-${key}.sock`),
-    logPath: path.join(logDirectory, 'monitor.log'),
+    logDirectory,
+    logPath: path.join(logDirectory, logFileName()),
     cli,
   };
 }
@@ -42,4 +54,4 @@ function codexProcessIds(processList, ownPid = process.pid) {
   return [...targets].reverse().filter(pid => pid !== ownPid && pid > 1);
 }
 
-module.exports = { runtimePaths, codexProcessIds };
+module.exports = { runtimePaths, codexProcessIds, logFileName, latestLog };

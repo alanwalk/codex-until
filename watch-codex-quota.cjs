@@ -4,8 +4,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { runtimePaths, codexProcessIds } = require('./platform.cjs');
 
-const { logPath } = runtimePaths();
-const polling = { intervalMs: 60000, nextQueryAt: null, querying: false, cooldownUntil: null, failureCount: 0 };
+const logPath = process.env.CODEX_UNTIL_LOG_PATH || runtimePaths().logPath;
+const polling = { intervalMs: 60000, nextQueryAt: null, querying: false, cooldownUntil: null,
+  failureCount: 0, quota: null, lastSuccessfulAt: null, lastError: null,
+  querySequence: 0, successfulSequence: 0 };
 const quotaParams = { excludeResetCreditDetails: true };
 function quotaError(error) {
   const result = new Error(error.message || 'Quota query failed');
@@ -29,6 +31,7 @@ function retryAfterMs(error, now = Date.now()) {
 }
 
 function recordFailure(error, now = Date.now()) {
+  polling.lastError = error.message;
   polling.failureCount += 1;
   const requestedWait = retryAfterMs(error, now);
   const backoff = Math.min(1800000, 60000 * 2 ** Math.min(5, polling.failureCount - 1));
@@ -38,6 +41,7 @@ function recordFailure(error, now = Date.now()) {
 }
 
 function recordSuccess() {
+  polling.lastError = null;
   polling.failureCount = 0;
   polling.cooldownUntil = null;
 }
@@ -46,6 +50,11 @@ function queryDeadline(requested) {
   return Math.max(requested, polling.cooldownUntil || 0);
 }
 let reschedule = null;
+function requestRefresh(now = Date.now()) {
+  const requiredSequence = polling.querying ? polling.querySequence : polling.querySequence + 1;
+  if (!polling.querying && reschedule) reschedule(now);
+  return requiredSequence;
+}
 function setIntervalMs(intervalMs) {
   if (![10000, 30000, 60000, 300000].includes(intervalMs)) throw new Error('Unsupported polling interval');
   polling.intervalMs = intervalMs;
@@ -182,9 +191,13 @@ async function main(queryOnly = process.argv.includes('--once')) {
   for (;;) {
     const started = Date.now();
     polling.querying = true;
+    polling.querySequence += 1;
     polling.nextQueryAt = null;
     try {
       const current = getSnapshot(await readQuota());
+      polling.quota = current.windows;
+      polling.lastSuccessfulAt = Date.now();
+      polling.successfulSequence = polling.querySequence;
       recordSuccess();
       log(Object.entries(current.windows).map(([name, window]) =>
         `${name}: remaining ${100 - window.usedPercent}%, reset ${new Date(window.resetsAt * 1000).toISOString()}`
@@ -209,5 +222,5 @@ async function main(queryOnly = process.argv.includes('--once')) {
 }
 
 module.exports = { getSnapshot, resetReason, main, logPath, polling, setIntervalMs, waitForNextQuery,
-  quotaParams, quotaError, retryAfterMs, recordFailure, recordSuccess, queryDeadline };
+  quotaParams, quotaError, retryAfterMs, recordFailure, recordSuccess, queryDeadline, requestRefresh };
 if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -4,13 +4,28 @@ const readline = require('node:readline');
 const intervals = [10000, 30000, 60000, 300000];
 const intervalLabels = ['10s', '30s', '1m', '5m'];
 
+function monitorLines(state, fallbackPath) {
+  // Older daemons only expose a log path; new daemons return quota directly.
+  if (state.quota !== undefined) return [];
+  const logPath = state.logPath || fallbackPath;
+  return logPath && fs.existsSync(logPath)
+    ? fs.readFileSync(logPath, 'utf8').trimEnd().split('\n').slice(-150) : [];
+}
+
 function renderPanel({ running, pid, lines, selected = 0, columns = 80, color = true,
-  now = Date.now(), intervalMs = 60000, nextQueryAt, querying, cooldownUntil }) {
+  now = Date.now(), intervalMs = 60000, nextQueryAt, querying, cooldownUntil, showMenu = true,
+  quota: snapshot, lastSuccessfulAt, lastError, minimumSequence = 0, successfulSequence = 0 }) {
   const paint = (code, text) => color ? `\x1b[${code}m${text}\x1b[0m` : text;
   const clean = text => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x1f\x7f]/g, '');
   const records = lines.map(clean);
   const quota = [...records].reverse().find(line => /remaining [\d.]+%/.test(line));
-  const match = quota?.match(/^(\S+).*?remaining ([\d.]+)%, reset (\S+)/);
+  let match = quota?.match(/^(\S+).*?remaining ([\d.]+)%, reset (\S+)/);
+  if (snapshot !== undefined) {
+    const fresh = successfulSequence >= minimumSequence;
+    const window = fresh ? snapshot?.primary ?? snapshot?.secondary : null;
+    match = window ? [null, new Date(lastSuccessfulAt).toISOString(), String(100 - window.usedPercent),
+      new Date(window.resetsAt * 1000).toISOString()] : null;
+  }
   const width = Math.max(8, Math.min(28, columns - 20));
   const latestRecord = records.at(-1) || '';
   const lastAttempt = Date.parse(latestRecord.split(' ')[0]);
@@ -25,9 +40,10 @@ function renderPanel({ running, pid, lines, selected = 0, columns = 80, color = 
     '', paint('36', '  ╭───────────────────────╮'),
     paint('36', '  │') + paint('1;36', '  CODEX UNTIL          ') + paint('36', '│'),
     paint('36', '  ╰───────────────────────╯'), '',
-    `  ${paint(running ? '32' : '33', running ? '● 正在监控' : '○ 监控已退出')}  ${paint('90', `PID ${pid ?? '—'}`)}`,
-    `  ${paint('36', queryStatus)}`,
+    `  ${paint(running ? '32' : '33', running ? '● 正在监控' : '○ 未启动')}${running ? '  ' + paint('90', `PID ${pid ?? '—'}`) : ''}`,
   ];
+  if (!running) return output.join('\n') + '\n';
+  output.push(`  ${paint('36', queryStatus)}`);
   if (match) {
     const remaining = Math.max(0, Math.min(100, Number(match[2])));
     const filled = Math.round(width * remaining / 100);
@@ -35,11 +51,12 @@ function renderPanel({ running, pid, lines, selected = 0, columns = 80, color = 
       `  ${paint('36', '━'.repeat(filled))}${paint('90', '─'.repeat(width - filled))}`,
       `  下次重置  ${new Date(match[3]).toLocaleString('zh-CN', { hour12: false })}`);
   } else output.push('', '  剩余额度  —', '  下次重置  —',
-    paint('90', '  正在等待首次额度查询…'));
-  if (records.at(-1)?.includes('ERROR')) {
-    output.push(paint('33', '  刷新失败，以上为上次成功数据。'));
+    paint('90', '  正在等待本次额度查询…'));
+  if (lastError || records.at(-1)?.includes('ERROR')) {
+    output.push(paint('33', match ? '  刷新失败，以上为上次成功数据。' : '  本次查询失败，等待重试。'));
   }
   output.push('', paint('90', '  额度重置后，结束本机全部 Codex 会话。'), '');
+  if (!showMenu) return output.join('\n');
   const choices = intervalLabels.map((label, index) => intervals[index] === intervalMs ? `[${label}]` : label).join('  ');
   for (const [index, label] of [`刷新间隔  ‹ ${choices} ›`, '转入后台，继续监控', '停止监控并退出'].entries()) {
     output.push(index === selected ? paint('1;36', `  ❯ ${label}`) : paint('90', `    ${label}`));
@@ -49,6 +66,11 @@ function renderPanel({ running, pid, lines, selected = 0, columns = 80, color = 
 }
 
 async function consoleMode({ status, request, logPath }) {
+  const initial = await request('refresh');
+  if (!Number.isFinite(initial.requiredSequence)) {
+    throw new Error('当前后台版本不支持启动时刷新，请先 stop，再重新启动。');
+  }
+  const minimumSequence = initial.requiredSequence;
   const input = process.stdin;
   const output = process.stdout;
   let selected = 0;
@@ -67,7 +89,7 @@ async function consoleMode({ status, request, logPath }) {
     const draw = () => {
       if (closing) return;
       const panel = renderPanel({ ...current, lines, selected,
-        columns: output.columns || 80, color: !process.env.NO_COLOR });
+        minimumSequence, columns: output.columns || 80, color: !process.env.NO_COLOR });
       if (panel === lastPanel) return;
       lastPanel = panel;
       output.write('\x1b[H\x1b[2J' + panel);
@@ -124,8 +146,8 @@ async function consoleMode({ status, request, logPath }) {
       if (busy || closing) return;
       busy = true;
       try {
-        if (fs.existsSync(logPath)) lines = fs.readFileSync(logPath, 'utf8').trimEnd().split('\n').slice(-150);
         current = await status();
+        lines = monitorLines(current, logPath);
         if (closing) return;
         draw();
         if (!current.running) await finish(false, '后台监控已退出，请用 logs 查看原因。');
@@ -142,4 +164,4 @@ async function consoleMode({ status, request, logPath }) {
   });
 }
 
-module.exports = { consoleMode, renderPanel };
+module.exports = { consoleMode, renderPanel, monitorLines };

@@ -55,7 +55,7 @@ assert.ok(renderPanel({ ...countdownOptions, now: Date.parse('2026-10-15T07:01:1
 assert.ok(renderPanel({ ...countdownOptions, now: Date.parse('2026-10-15T07:02:01Z') }).includes('正在查询'));
 assert.ok(!refreshed.includes('刷新失败'));
 const waiting = renderPanel({ running: true, lines: [], selected: 2, color: false });
-assert.ok(waiting.includes('等待首次'));
+assert.ok(waiting.includes('等待本次'));
 assert.ok(waiting.includes('❯ 停止监控'));
 console.log('Terminal panel checks passed.');
 
@@ -126,8 +126,58 @@ const { runtimePaths, codexProcessIds } = require('./platform.cjs');
 assert.equal(runtimePaths('win32', {}, '/example').windows,true);
 assert.ok(runtimePaths('darwin', {CODEX_QUOTA_CLI:'/custom/codex'}, '/example').address.endsWith('.sock'));
 assert.equal(runtimePaths('darwin', {CODEX_QUOTA_CLI:'/custom/codex'}, '/example').cli,'/custom/codex');
-assert.equal(runtimePaths('linux', {}, '/example').logPath, require('node:path').join('/example','.codex-until','monitor.log'));
+assert.equal(runtimePaths('linux', {}, '/example').logDirectory, require('node:path').join('/example','.cache','codex-until'));
+assert.equal(runtimePaths('darwin', {}, '/example').logDirectory, require('node:path').join('/example','.cache','codex-until'));
+assert.equal(runtimePaths('win32', {LOCALAPPDATA:'/local-app-data'}, '/example').logDirectory, require('node:path').join('/local-app-data','.cache','codex-until'));
 const processFixture = '10 1 /Applications/Codex.app/Contents/MacOS/Codex\n11 10 /path/Codex Helper\n12 11 /bin/sh\n20 1 /usr/local/bin/codex\n21 20 /bin/node\n30 1 /usr/bin/node';
 assert.deepEqual(new Set(codexProcessIds(processFixture,999)),new Set([10,11,12,20,21]));
 assert.ok(!codexProcessIds(processFixture,21).includes(21));
 console.log('Cross-platform paths and Codex process-tree selection passed.');
+const stoppedPanel = renderPanel({ running: false, lines: [], color: false, showMenu: false });
+assert.ok(stoppedPanel.includes('未启动'));
+assert.ok(!stoppedPanel.includes('剩余额度'));
+assert.ok(!stoppedPanel.includes('查询'));
+assert.ok(!stoppedPanel.includes('PID'));
+const statusPanel = renderPanel({ ...countdownOptions, color: false, showMenu: false, pid: 123 });
+assert.ok(statusPanel.includes('PID 123'));
+assert.ok(statusPanel.includes('93%'));
+assert.ok(statusPanel.includes('下次重置'));
+assert.ok(!statusPanel.includes('刷新间隔'));
+assert.ok(!statusPanel.includes('转入后台'));
+console.log('One-shot status panel checks passed.');
+
+const { monitorLines } = require('./bin/terminal.cjs');
+const directState = { running: true, quota: { primary: { usedPercent: 15, resetsAt: 1792649562 } }, lastSuccessfulAt: Date.parse('2026-10-15T08:45:00Z') };
+assert.deepEqual(monitorLines(directState, '/missing/frontend/log'), []);
+const directPanel = renderPanel({...directState, lines: [], color: false});
+assert.ok(directPanel.includes('85%'));
+assert.ok(!directPanel.includes('等待本次'));
+const noSnapshot = renderPanel({...directState, quota: null, lines: countdownOptions.lines, color: false});
+assert.ok(noSnapshot.includes('等待本次'));
+assert.ok(!noSnapshot.includes('93%'));
+console.log('Direct daemon quota rendering without frontend log access passed.');
+
+const {requestRefresh} = require('./watch-codex-quota.cjs');
+polling.querySequence=4; polling.successfulSequence=4; polling.querying=false;
+const required=requestRefresh(testNow);
+assert.equal(required,5);
+assert.equal(requestRefresh(testNow),5);
+polling.querying=true; polling.querySequence=5;
+assert.equal(requestRefresh(testNow),5);
+polling.querying=false;
+const pendingPanel=renderPanel({...directState,lines:[],color:false,minimumSequence:5,successfulSequence:4});
+assert.ok(!pendingPanel.includes('85%'));
+assert.ok(pendingPanel.includes('等待本次'));
+const freshPanel=renderPanel({...directState,lines:[],color:false,minimumSequence:5,successfulSequence:5});
+assert.ok(freshPanel.includes('85%'));
+console.log('Startup fresh-query gating and in-flight query reuse passed.');
+
+const {logFileName, latestLog}=require('./platform.cjs');
+assert.equal(logFileName(new Date(2026,9,15,16,50,30,123)),'codex-until-2026-10-15_16-50-30-123.log');
+const logTestDirectory=require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(),'codex-until-logs-'));
+try {
+  assert.equal(latestLog(logTestDirectory),null);
+  for(const name of ['codex-until-2026-10-15_16-50-30-123.log','codex-until-2026-10-15_17-00-00-001.log','other.log'])require('node:fs').writeFileSync(require('node:path').join(logTestDirectory,name),'');
+  assert.equal(require('node:path').basename(latestLog(logTestDirectory)),'codex-until-2026-10-15_17-00-00-001.log');
+}finally{require('node:fs').rmSync(logTestDirectory,{recursive:true,force:true});}
+console.log('Startup timestamp log naming and latest log selection passed.');

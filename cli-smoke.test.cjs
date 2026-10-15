@@ -8,18 +8,20 @@ function run(action) {
     env: { ...process.env, CODEX_QUOTA_CLI: path.join(__dirname, 'no-real-codex-for-smoke-test') },
   });
   assert.equal(result.status, 0, result.stderr || result.error?.message);
-  return JSON.parse(result.stdout);
+  return action[0] === 'status' ? result.stdout : JSON.parse(result.stdout);
 }
 
-assert.equal(run(['status']).running, false, 'Smoke test requires no existing monitor');
+assert.ok(run(['status']).includes('未启动'), 'Smoke test requires no existing monitor');
 try {
   const started = run(['start', '-b']);
   assert.equal(started.running, true);
   assert.equal(started.intervalMs, 60000);
   assert.equal(run(['start', '-b']).pid, started.pid);
-  assert.equal(run(['status']).pid, started.pid);
+  const panel = run(['status']);
+  assert.ok(panel.includes(`PID ${started.pid}`));
+  assert.ok(!panel.includes('刷新间隔'));
 } finally {
   run(['stop']);
 }
-assert.equal(run(['status']).running, false);
+assert.ok(run(['status']).includes('未启动'));
 console.log('Background start, duplicate start, status and stop passed.');
