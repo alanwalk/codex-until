@@ -1,6 +1,6 @@
 {
   "name": "@alanwalk/codex-until",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Stop local Codex sessions when quota resets during monitoring.",
   "homepage": "https://github.com/alanwalk/codex-until#readme",
   "repository": {
@@ -16,7 +16,7 @@
   "engines": { "node": ">=18" },
   "os": ["win32"],
   "scripts": {
-    "check": "node --check bin/cli.cjs && node --check watch-codex-quota.cjs && node bin/cli.cjs --help",
+    "check": "node --check bin/cli.cjs && node --check bin/terminal.cjs && node --check watch-codex-quota.cjs && node bin/cli.cjs --help",
     "test": "node watch-codex-quota.test.cjs",
     "prepublishOnly": "npm run check && npm test"
   },

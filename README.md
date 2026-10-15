@@ -2,9 +2,17 @@
 
 Windows Codex 额度监控命令行工具。零 npm 依赖，Node.js 18 或以上。
 
+菜单第一项为“刷新间隔”，左右键切换 `10s / 30s / 1m / 5m`，默认 `1m`；后两项为“转入后台”和“停止监控并退出”。
+
+使用官方轻量轮询参数 `excludeResetCreditDetails: true`，跳过不需要的重置次数详情查询。查询失败自动退避：若 App Server 错误数据或文本中包含有效的 `Retry-After`，至少等待服务端要求的时间；否则依次等待 1、2、4、8、16、30 分钟，之后保持最多每 30 分钟重试。等待不会短于所选刷新间隔，成功后恢复所选间隔。退避期间修改刷新间隔不能提前结束服务端等待。
+
+App Server 当前并不保证透传 HTTP 响应头，因此不能保证总能获取 `Retry-After`；无法获得时使用上述退避。面板显示退避倒计时，保留上次成功数据和额度比较基线。
+
+终端面板展示剩余额度、下次额度重置时间（按本地时区显示），并逐秒更新距下次查询的预计倒计时。后台默认每 60 秒查询额度，可在菜单中上下选中“刷新间隔”，再用左右键切换 `10s / 30s / 1m / 5m`。修改即时应用到同一后台进程，转入后台后保持所选间隔；重新启动恢复默认 `1m`。后台按所选间隔查询额度，查询期间显示“正在查询”。查询失败时保留上次成功数据并提示错误；详细记录通过 logs 命令查看。
+
 需要已安装并通过 ChatGPT 账号登录的官方 Codex CLI / 桌面应用。工具复用本地登录状态，不打印 token。默认使用桌面应用 CLI，找不到时使用 PATH 中的 `codex.exe`；可通过 `CODEX_QUOTA_CLI` 指定完整可执行文件路径。
 
-发布到 npm 后，无需预先执行 `npm install`，直接运行：
+无需预先执行 `npm install`，直接运行：
 
 ```powershell
 npx @alanwalk/codex-until
@@ -14,12 +22,12 @@ npx --yes @alanwalk/codex-until quota
 npx --yes @alanwalk/codex-until logs
 ```
 
-不带参数会立即开启监控：在交互终端中显示最新日志，输入 `b` 并回车转入后台，输入 `q` 并回车停止监控并退出，`Ctrl+C` 同样停止监控。转入后台只是退出控制台，监控进程及本次比较基线保持不变。输入流关闭时也会退出控制台并保留后台监控。
+不带参数会立即开启监控：在交互终端中显示彩色状态面板、剩余额度进度条、查询倒计时和下次重置时间。使用方向键选择操作并回车确认，也可直接按 `b` 转入后台、按 `q` 停止监控并退出，`Ctrl+C` 同样停止监控。转入后台只是退出控制台，监控进程及本次比较基线保持不变。输入流关闭时也会退出控制台并保留后台监控。
 
-`start` 与无参数执行相同，在交互终端默认显示日志和 b/q 选项；使用 `-b / --background` 直接进入后台：
+`start` 与无参数执行相同，在交互终端默认显示状态面板和操作菜单；使用 `-b / --background` 直接进入后台：
 
 ```powershell
-npx @alanwalk/codex-until                      # 显示日志及 b/q 选项
+npx @alanwalk/codex-until                      # 显示状态面板和菜单
 npx @alanwalk/codex-until start                # 同上
 npx @alanwalk/codex-until -b                   # 直接后台运行
 npx @alanwalk/codex-until start --background   # 同上，可简写 -b
@@ -39,38 +47,3 @@ npx @alanwalk/codex-until start --background   # 同上，可简写 -b
 **触发后执行 `taskkill /F /T /IM codex.exe`，强制结束本机所有 Codex 进程及其子进程，包括其他账号的本地会话，正在执行的任务会被中断。远程主机不受影响。** 成功后监控退出；停止失败会记录错误，后续继续尝试。没有自动消费额度重置次数的功能。
 
 日志保存在 `%LOCALAPPDATA%\codex-quota-guard\monitor.log`，不写入 npx 缓存中的包目录。日志不包含凭据。后台监控没有开机自启功能。
-
-## 本地验证
-
-```powershell
-npm run prepublishOnly
-npm pack
-```
-
-当前包名是 `@alanwalk/codex-until`，未确认 npm 名称可用性。包内使用 files 白名单，不包含本机日志、测试或登录凭据。无需构建、无需 npm install。npx 首次运行仍需联网下载并缓存包。
-
-## GitHub Actions 自动发布 npm
-
-沿用 [alanwalk/svn-merge-tool](https://github.com/alanwalk/svn-merge-tool/blob/main/.github/workflows/npm-publish.yml) 的发布方式：发布 GitHub Release 后，检查通过才发布 npm。配置文件为 `.github/workflows/npm-publish.yml`，Node.js 24，使用 npm Trusted Publishing（OIDC），无需配置 `NPM_TOKEN`。
-
-### 首次配置
-
-1. 将项目上传到你自己的 GitHub 仓库，包含 `.github/workflows/npm-publish.yml`。
-2. 确认 npm 账号有 `@alanwalk` scope 的发布权限。若该包尚不存在，先在本机完成首次发布：
-
-   ```powershell
-   npm login
-   npm publish --access public
-   ```
-
-3. 打开 npm 网站中 `@alanwalk/codex-until` 的 Settings → Trusted Publisher，选择 GitHub Actions，填写实际 GitHub 用户/组织、仓库名，以及工作流文件名 `npm-publish.yml`。当前 workflow 未使用 GitHub Environment，此项留空；如果页面提供 Allowed actions，允许直接执行 `npm publish`。
-4. 按 [npm 官方 Trusted Publishing 文档](https://docs.npmjs.com/trusted-publishers/) 保存配置。上传源码本身不会触发发布；只有发布 GitHub Release 才触发。
-
-### 后续发版
-
-1. 修改代码，运行 `npm run prepublishOnly`。
-2. 修改版本，例如运行 `npm version patch --no-git-tag-version`，然后提交并推送代码。
-3. 在 GitHub 创建并发布 Release，tag 必须为 `v` 加 `package.json` 中的版本，例如 `v0.1.1`。tag 应指向准备发布的提交。
-4. Actions 先在 Windows 上检查 tag、语法、帮助入口、判断测试及包内容，再在 Ubuntu 上使用 OIDC 执行 `npm publish`。全程无需安装 npm 依赖。
-
-版本号必须是 npm 尚未发布的版本；相同版本不能重复发布。`package.json` 已设置 public access。Release 的 prerelease 标志不会自动切换 npm dist-tag，当前流程统一使用 `latest`，请只发布准备正式使用的版本。
