@@ -121,3 +121,13 @@ try {
   Date.now = realNow;
 }
 console.log('Live scheduler rescheduling and long Retry-After timer overflow checks passed.');
+
+const { runtimePaths, codexProcessIds } = require('./platform.cjs');
+assert.equal(runtimePaths('win32', {}, '/example').windows,true);
+assert.ok(runtimePaths('darwin', {CODEX_QUOTA_CLI:'/custom/codex'}, '/example').address.endsWith('.sock'));
+assert.equal(runtimePaths('darwin', {CODEX_QUOTA_CLI:'/custom/codex'}, '/example').cli,'/custom/codex');
+assert.equal(runtimePaths('linux', {}, '/example').logPath, require('node:path').join('/example','.codex-until','monitor.log'));
+const processFixture = '10 1 /Applications/Codex.app/Contents/MacOS/Codex\n11 10 /path/Codex Helper\n12 11 /bin/sh\n20 1 /usr/local/bin/codex\n21 20 /bin/node\n30 1 /usr/bin/node';
+assert.deepEqual(new Set(codexProcessIds(processFixture,999)),new Set([10,11,12,20,21]));
+assert.ok(!codexProcessIds(processFixture,21).includes(21));
+console.log('Cross-platform paths and Codex process-tree selection passed.');

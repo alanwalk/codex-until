@@ -1,14 +1,12 @@
 #!/usr/bin/env node
 const net = require('node:net');
-const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs');
-const crypto = require('node:crypto');
+const { runtimePaths } = require('../platform.cjs');
 const { consoleMode } = require('./terminal.cjs');
 const { spawn } = require('node:child_process');
 const watch = require('../watch-codex-quota.cjs');
-const userKey = crypto.createHash('sha256').update(os.homedir()).digest('hex').slice(0, 16);
-const pipe = `\\\\.\\pipe\\codex-quota-guard-${userKey}`;
+const { address: pipe, windows } = runtimePaths();
 
 function request(action) {
   return new Promise((resolve, reject) => {
@@ -33,6 +31,8 @@ async function status() {
 }
 
 async function daemon() {
+  let ownsSocket = false;
+  let staleSocketRetried = false;
   const server = net.createServer(socket => {
     socket.setTimeout(2000, () => socket.destroy());
     socket.on('error', () => {});
@@ -48,16 +48,33 @@ async function daemon() {
       });
     });
   });
-  server.on('error', error => {
+  server.on('error', async error => {
+    if (!windows && error.code === 'EADDRINUSE' && !staleSocketRetried) {
+      try {
+        const existing = await status();
+        if (existing.running) { process.exit(0); return; }
+        fs.unlinkSync(pipe);
+        staleSocketRetried = true;
+        server.listen(pipe);
+        return;
+      } catch (failure) { console.error(failure.message); process.exit(1); return; }
+    }
     if (error.code !== 'EADDRINUSE') console.error(error.message);
     process.exit(error.code === 'EADDRINUSE' ? 0 : 1);
   });
-  server.listen(pipe, () => {
+  process.once('exit', () => {
+    if (ownsSocket && !windows) { try { fs.unlinkSync(pipe); } catch {} }
+  });
+  process.once('SIGTERM', () => process.exit(0));
+  server.on('listening', () => {
+    ownsSocket = true;
+    if (!windows) fs.chmodSync(pipe, 0o600);
     watch.main().then(() => process.exit(process.exitCode || 0)).catch(error => {
       console.error(error.message);
       process.exit(1);
     });
   });
+  server.listen(pipe);
 }
 
 function parseOptions(args, interactive) {
@@ -77,7 +94,7 @@ function parseOptions(args, interactive) {
 async function main() {
   const { action, foreground } = parseOptions(process.argv.slice(2), Boolean(process.stdin.isTTY && process.stdout.isTTY));
   if (['help', '--help', '-h'].includes(action)) {
-    console.log(`Codex Until (Windows, Node >=18)
+    console.log(`Codex Until (Windows / macOS / Linux, Node >=18)
 Usage: codex-until [start|stop|status|quota|logs]
 No command defaults to start. Without -b, show b/q controls in a terminal.
 Non-interactive invocations run in the background.
@@ -87,11 +104,10 @@ Non-interactive invocations run in the background.
   status  Print monitor status as JSON.
   quota   Query quota once without enabling monitoring.
   logs    Print the last 50 log lines.
-Reset detection stops ALL local codex.exe processes and their children.
+Reset detection stops ALL local Codex processes and their children.
 Restarting the monitor establishes a fresh baseline. No baseline is persisted.`);
     return;
   }
-  if (process.platform !== 'win32') throw new Error('This version supports Windows only.');
   if (action === '--daemon') return daemon();
   if (action === 'quota') return watch.main(true);
   if (action === 'logs') {

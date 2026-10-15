@@ -2,9 +2,9 @@ const { spawn, spawnSync } = require('node:child_process');
 const readline = require('node:readline');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
+const { runtimePaths, codexProcessIds } = require('./platform.cjs');
 
-const logPath = path.join(process.env.LOCALAPPDATA || os.homedir(), 'codex-quota-guard', 'monitor.log');
+const { logPath } = runtimePaths();
 const polling = { intervalMs: 60000, nextQueryAt: null, querying: false, cooldownUntil: null, failureCount: 0 };
 const quotaParams = { excludeResetCreditDetails: true };
 function quotaError(error) {
@@ -78,8 +78,7 @@ function log(message) {
 
 function readQuota() {
   return new Promise((resolve, reject) => {
-    const desktopCli = path.join(process.env.LOCALAPPDATA || '', 'Programs/OpenAI/Codex/bin/codex.exe');
-    const cli = process.env.CODEX_QUOTA_CLI || (fs.existsSync(desktopCli) ? desktopCli : 'codex.exe');
+    const { cli } = runtimePaths();
     const child = spawn(cli, ['app-server', '--stdio'], {
       windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -155,6 +154,18 @@ function resetReason(previous, current) {
 }
 
 function stopCodex() {
+  if (process.platform !== 'win32') {
+    const result = spawnSync('ps', ['-A', '-o', 'pid=,ppid=,comm='], { encoding: 'utf8' });
+    if (result.error || result.status !== 0) throw new Error('Failed to enumerate Codex processes');
+    const failures = [];
+    for (const pid of codexProcessIds(result.stdout)) {
+      try { process.kill(pid, 'SIGKILL'); }
+      catch (error) { if (error.code !== 'ESRCH') failures.push(`${pid}: ${error.code}`); }
+    }
+    if (failures.length) throw new Error(`Failed to stop Codex: ${failures.join(', ')}`);
+    log('All local Codex processes and their child processes stopped.');
+    return;
+  }
   // /T also stops tasks spawned by each Codex process.
   const result = spawnSync('taskkill.exe', ['/F', '/T', '/IM', 'codex.exe'], {
     windowsHide: true, encoding: 'utf8',
