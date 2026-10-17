@@ -13,7 +13,7 @@ function monitorLines(state, fallbackPath) {
 }
 
 function renderPanel({ running, pid, lines, selected = 0, columns = 80, color = true,
-  now = Date.now(), intervalMs = 60000, nextQueryAt, querying, cooldownUntil, showMenu = true,
+  minRemaining = null, thresholdInput = '', now = Date.now(), intervalMs = 60000, nextQueryAt, querying, cooldownUntil, showMenu = true,
   quota: snapshot, lastSuccessfulAt, lastError, minimumSequence = 0, successfulSequence = 0 }) {
   const paint = (code, text) => color ? `\x1b[${code}m${text}\x1b[0m` : text;
   const clean = text => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x1f\x7f]/g, '');
@@ -55,10 +55,11 @@ function renderPanel({ running, pid, lines, selected = 0, columns = 80, color = 
   if (lastError || records.at(-1)?.includes('ERROR')) {
     output.push(paint('33', match ? '  刷新失败，以上为上次成功数据。' : '  本次查询失败，等待重试。'));
   }
-  output.push('', paint('90', '  额度重置后，结束本机全部 Codex 会话。'), '');
+  const stopDescription = minRemaining === null ? '额度重置后' : `任一窗口剩余 ≤ ${minRemaining}% 时`;
+  output.push('', paint('90', `  ${stopDescription}，结束本机全部 Codex 会话。`), '');
   if (!showMenu) return output.join('\n');
   const choices = intervalLabels.map((label, index) => intervals[index] === intervalMs ? `[${label}]` : label).join('  ');
-  for (const [index, label] of [`刷新间隔  ‹ ${choices} ›`, '转入后台，继续监控', '停止监控并退出'].entries()) {
+  for (const [index, label] of [`刷新间隔  ‹ ${choices} ›`, `最小剩余  ‹ ${minRemaining === null ? '重置时结束' : minRemaining + '%'} ›${thresholdInput ? '  输入: ' + thresholdInput : ''}（数字+回车 / r 恢复重置）`, '转入后台，继续监控', '停止监控并退出'].entries()) {
     output.push(index === selected ? paint('1;36', `  ❯ ${label}`) : paint('90', `    ${label}`));
   }
   output.push('');
@@ -77,6 +78,8 @@ async function consoleMode({ status, request, logPath }) {
   let busy = false;
   let closing = false;
   let changingInterval = false;
+  let thresholdInput = '';
+  let changingThreshold = false;
   let current = { running: true };
   let lines = [];
   let lastPanel = '';
@@ -88,7 +91,7 @@ async function consoleMode({ status, request, logPath }) {
   return new Promise(resolve => {
     const draw = () => {
       if (closing) return;
-      const panel = renderPanel({ ...current, lines, selected,
+      const panel = renderPanel({ ...current, lines, selected, thresholdInput,
         minimumSequence, columns: output.columns || 80, color: !process.env.NO_COLOR });
       if (panel === lastPanel) return;
       lastPanel = panel;
@@ -131,12 +134,34 @@ async function consoleMode({ status, request, logPath }) {
       } catch (error) { lines = [...lines, `ERROR: ${error.message}`]; draw(); }
       finally { changingInterval = false; }
     };
+    const changeThreshold = async value => {
+      if (changingThreshold || closing) return;
+      changingThreshold = true;
+      try {
+        const result = await request(`min-remaining:${value === null ? 'reset' : value}`);
+        if (result.error) throw new Error(result.error);
+        if (result.minRemaining !== value) throw new Error('当前后台版本不支持百分比设置，请停止后重新启动监控。');
+        current = result;
+        thresholdInput = '';
+        draw();
+      } catch (error) { lines = [...lines, `ERROR: ${error.message}`]; draw(); }
+      finally { changingThreshold = false; }
+    };
     const onKey = (text, key = {}) => {
-      if (key.name === 'up') { selected = (selected + 2) % 3; draw(); }
-      else if (key.name === 'down') { selected = (selected + 1) % 3; draw(); }
+      if (key.name === 'up') { selected = (selected + 3) % 4; draw(); }
+      else if (key.name === 'down') { selected = (selected + 1) % 4; draw(); }
       else if (selected === 0 && key.name === 'left') void changeInterval(-1);
       else if (selected === 0 && key.name === 'right') void changeInterval(1);
-      else if (key.name === 'return' && selected !== 0) void finish(selected === 2);
+      else if (selected === 1 && /^[0-9.]$/.test(text || '')) { thresholdInput += text; draw(); }
+      else if (selected === 1 && key.name === 'backspace') { thresholdInput = thresholdInput.slice(0, -1); draw(); }
+      else if (selected === 1 && key.name === 'return' && thresholdInput) void changeThreshold(Number(thresholdInput));
+      else if (selected === 1 && text === 'r') void changeThreshold(null);
+      else if (selected === 1 && key.name === 'left') {
+        const value = current.minRemaining;
+        void changeThreshold(value == null || value <= 0 ? null : Math.max(0, value - 1));
+      }
+      else if (selected === 1 && key.name === 'right') void changeThreshold(Math.min(100, (current.minRemaining ?? -1) + 1));
+      else if (key.name === 'return' && selected >= 2) void finish(selected === 3);
       else if (text === 'b') void finish(false);
       else if (text === 'q' || (key.ctrl && key.name === 'c')) void finish(true);
     };

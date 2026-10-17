@@ -54,7 +54,7 @@ assert.ok(renderPanel({ ...countdownOptions, now: Date.parse('2026-10-15T07:01:1
 assert.ok(renderPanel({ ...countdownOptions, now: Date.parse('2026-10-15T07:01:16Z') }).includes('44 秒后查询'));
 assert.ok(renderPanel({ ...countdownOptions, now: Date.parse('2026-10-15T07:02:01Z') }).includes('正在查询'));
 assert.ok(!refreshed.includes('刷新失败'));
-const waiting = renderPanel({ running: true, lines: [], selected: 2, color: false });
+const waiting = renderPanel({ running: true, lines: [], selected: 3, color: false });
 assert.ok(waiting.includes('等待本次'));
 assert.ok(waiting.includes('❯ 停止监控'));
 console.log('Terminal panel checks passed.');
@@ -181,3 +181,34 @@ try {
   assert.equal(require('node:path').basename(latestLog(logTestDirectory)),'codex-until-2026-10-15_17-00-00-001.log');
 }finally{require('node:fs').rmSync(logTestDirectory,{recursive:true,force:true});}
 console.log('Startup timestamp log naming and latest log selection passed.');
+
+const { setMinRemaining, stopReason } = require('./watch-codex-quota.cjs');
+for (const invalid of [-1, 101, NaN, Infinity, '10']) assert.throws(() => setMinRemaining(invalid));
+setMinRemaining(10);
+assert.equal(stopReason(null, snapshot(89)), null);
+assert.ok(stopReason(null, snapshot(90)));
+assert.ok(stopReason(null, snapshot(95)));
+assert.equal(stopReason(snapshot(90), snapshot(0, 200)), null);
+const secondaryLow = snapshot(20);
+secondaryLow.windows.secondary = { usedPercent: 95, resetsAt: 100, windowDurationMins: 300 };
+assert.ok(stopReason(null, secondaryLow).startsWith('secondary:'));
+setMinRemaining(0);
+assert.ok(stopReason(null, snapshot(100)));
+assert.equal(stopReason(null, snapshot(99)), null);
+setMinRemaining(100);
+assert.ok(stopReason(null, snapshot(0)));
+setMinRemaining(null);
+assert.equal(stopReason(null, snapshot(90)), null);
+assert.ok(stopReason(snapshot(90), snapshot(0, 200)));
+assert.equal(parseOptions(['--min-remaining', '10', '-b'], true).minRemaining, 10);
+assert.equal(parseOptions(['start', '--min-remaining', '10%'], true).minRemaining, 10);
+assert.equal(parseOptions(['--daemon', '--min-remaining', '0'], false).minRemaining, 0);
+for (const value of ['-1', '101', 'NaN', '', '10abc']) {
+  assert.throws(() => parseOptions(['--min-remaining', value], true));
+}
+assert.throws(() => parseOptions(['status', '--min-remaining', '10'], true));
+const thresholdPanel = renderPanel({ running: true, lines: [], color: false, selected: 1, minRemaining: 10 });
+assert.ok(thresholdPanel.includes('❯ 最小剩余'));
+assert.ok(thresholdPanel.includes('≤ 10%'));
+assert.ok(renderPanel({ running: true, lines: [], color: false }).includes('重置时结束'));
+console.log('Minimum remaining threshold, CLI validation and panel checks passed.');

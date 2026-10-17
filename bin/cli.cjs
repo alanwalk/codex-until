@@ -30,7 +30,8 @@ async function status() {
   }
 }
 
-async function daemon() {
+async function daemon(minRemaining) {
+  if (minRemaining !== undefined) watch.setMinRemaining(minRemaining);
   let ownsSocket = false;
   let staleSocketRetried = false;
   const server = net.createServer(socket => {
@@ -42,6 +43,11 @@ async function daemon() {
       if (action === 'refresh') requiredSequence = watch.requestRefresh();
       if (action.startsWith('interval:')) {
         try { watch.setIntervalMs(Number(action.slice('interval:'.length))); }
+        catch (error) { socket.end(JSON.stringify({ error: error.message }) + '\n'); return; }
+      }
+      if (action.startsWith('min-remaining:')) {
+        const value = action.slice('min-remaining:'.length);
+        try { watch.setMinRemaining(value === 'reset' ? null : Number(value)); }
         catch (error) { socket.end(JSON.stringify({ error: error.message }) + '\n'); return; }
       }
       const result = { running: action !== 'stop', pid: process.pid, logPath: watch.logPath,
@@ -81,21 +87,34 @@ async function daemon() {
 }
 
 function parseOptions(args, interactive) {
-  if (args.length === 1 && args[0] === '--daemon') return { action: '--daemon', foreground: false };
   const hasCommand = args.length > 0 && !args[0].startsWith('-');
-  const action = hasCommand ? args[0] : 'start';
+  let action = 'start';
+  if (args[0] === '--daemon') action = '--daemon';
+  else if (hasCommand) action = args[0];
   if (['--help', '-h'].includes(args[0])) return { action: 'help', foreground: false };
-  const flags = hasCommand ? args.slice(1) : args;
-  if (flags.some(flag => !['--background', '-b'].includes(flag))) {
-    throw new Error('Unknown option. Use --help.');
+  const flags = hasCommand || action === '--daemon' ? args.slice(1) : args;
+  let background = false;
+  let minRemaining;
+  for (let index = 0; index < flags.length; index++) {
+    const flag = flags[index];
+    if (['--background', '-b'].includes(flag)) background = true;
+    else if (flag === '--min-remaining') {
+      const value = flags[++index];
+      if (!value || !/^(?:\d+(?:\.\d+)?|\.\d+)%?$/.test(value)) {
+        throw new Error('Minimum remaining percentage must be between 0 and 100');
+      }
+      minRemaining = Number(value.replace('%', ''));
+      if (minRemaining > 100) throw new Error('Minimum remaining percentage must be between 0 and 100');
+    } else throw new Error('Unknown option. Use --help.');
   }
-  const background = flags.some(flag => ['--background', '-b'].includes(flag));
-  if (flags.length && action !== 'start') throw new Error('Mode options are only supported by start.');
-  return { action, foreground: action === 'start' && interactive && !background };
+  if (flags.length && !['start', '--daemon'].includes(action)) throw new Error('Options are only supported by start.');
+  const options = { action, foreground: action === 'start' && interactive && !background };
+  if (minRemaining !== undefined) options.minRemaining = minRemaining;
+  return options;
 }
 
 async function main() {
-  const { action, foreground } = parseOptions(process.argv.slice(2), Boolean(process.stdin.isTTY && process.stdout.isTTY));
+  const { action, foreground, minRemaining } = parseOptions(process.argv.slice(2), Boolean(process.stdin.isTTY && process.stdout.isTTY));
   if (['help', '--help', '-h'].includes(action)) {
     console.log(`Codex Until (Windows / macOS / Linux, Node >=18)
 Usage: codex-until [start|stop|status|quota|logs]
@@ -103,15 +122,16 @@ No command defaults to start. Without -b, show b/q controls in a terminal.
 Non-interactive invocations run in the background.
   start   Start polling every 60 seconds; repeated calls are safe.
           --background / -b: start directly in the background.
+          --min-remaining <0-100>: stop when any quota window reaches this remaining percentage.
   stop    Stop monitoring only. Codex sessions remain running.
   status  Show the current status panel once, without a menu.
   quota   Query quota once without enabling monitoring.
   logs    Print the last 50 log lines.
-Reset detection stops ALL local Codex processes and their children.
+Meeting the stop condition stops ALL local Codex processes and their children.
 Restarting the monitor establishes a fresh baseline. No baseline is persisted.`);
     return;
   }
-  if (action === '--daemon') return daemon();
+  if (action === '--daemon') return daemon(minRemaining);
   if (action === 'quota') return watch.main(true);
   if (action === 'logs') {
     const current = await status();
@@ -133,6 +153,11 @@ Restarting the monitor establishes a fresh baseline. No baseline is persisted.`)
     return;
   }
   if (before.running) {
+    if (minRemaining !== undefined) {
+      const configured = await request(`min-remaining:${minRemaining}`);
+      if (configured.error) throw new Error(configured.error);
+      if (configured.minRemaining !== minRemaining) throw new Error('当前后台版本不支持百分比设置，请先 stop，再重新启动。');
+    }
     if (foreground) await consoleMode({ status, request, logPath: watch.logPath });
     else {
       const refreshed = await request('refresh');
@@ -142,7 +167,9 @@ Restarting the monitor establishes a fresh baseline. No baseline is persisted.`)
   }
   fs.mkdirSync(path.dirname(watch.logPath), { recursive: true });
   const output = fs.openSync(watch.logPath, 'a');
-  const child = spawn(process.execPath, [__filename, '--daemon'], {
+  const daemonArgs = [__filename, '--daemon'];
+  if (minRemaining !== undefined) daemonArgs.push('--min-remaining', String(minRemaining));
+  const child = spawn(process.execPath, daemonArgs, {
     detached: true, windowsHide: true, stdio: ['ignore', 'ignore', output],
     env: { ...process.env, CODEX_UNTIL_LOG_PATH: watch.logPath },
   });

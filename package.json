@@ -1,7 +1,7 @@
 {
   "name": "@alanwalk/codex-until",
-  "version": "0.2.2",
-  "description": "Stop local Codex sessions when quota resets during monitoring.",
+  "version": "0.3.0",
+  "description": "Stop local Codex sessions when quota resets or reaches a minimum remaining percentage.",
   "homepage": "https://github.com/alanwalk/codex-until#readme",
   "repository": {
     "type": "git",

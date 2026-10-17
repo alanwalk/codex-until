@@ -5,7 +5,7 @@ const path = require('node:path');
 const { runtimePaths, codexProcessIds } = require('./platform.cjs');
 
 const logPath = process.env.CODEX_UNTIL_LOG_PATH || runtimePaths().logPath;
-const polling = { intervalMs: 60000, nextQueryAt: null, querying: false, cooldownUntil: null,
+const polling = { minRemaining: null, intervalMs: 60000, nextQueryAt: null, querying: false, cooldownUntil: null,
   failureCount: 0, quota: null, lastSuccessfulAt: null, lastError: null,
   querySequence: 0, successfulSequence: 0 };
 const quotaParams = { excludeResetCreditDetails: true };
@@ -59,6 +59,25 @@ function setIntervalMs(intervalMs) {
   if (![10000, 30000, 60000, 300000].includes(intervalMs)) throw new Error('Unsupported polling interval');
   polling.intervalMs = intervalMs;
   if (reschedule) reschedule(Date.now() + intervalMs);
+}
+
+function setMinRemaining(value) {
+  if (value !== null && (!Number.isFinite(value) || value < 0 || value > 100)) {
+    throw new Error('Minimum remaining percentage must be between 0 and 100');
+  }
+  polling.minRemaining = value;
+  requestRefresh();
+}
+
+function stopReason(previous, current) {
+  if (polling.minRemaining === null) return resetReason(previous, current);
+  for (const [name, window] of Object.entries(current.windows)) {
+    const remaining = 100 - window.usedPercent;
+    if (remaining <= polling.minRemaining) {
+      return `${name}: remaining ${remaining}% <= ${polling.minRemaining}%`;
+    }
+  }
+  return null;
 }
 
 function waitForNextQuery(started) {
@@ -203,9 +222,9 @@ async function main(queryOnly = process.argv.includes('--once')) {
         `${name}: remaining ${100 - window.usedPercent}%, reset ${new Date(window.resetsAt * 1000).toISOString()}`
       ).join('; '));
       if (queryOnly) return;
-      const reason = resetReason(previous, current);
+      const reason = stopReason(previous, current);
       if (reason) {
-        log(`RESET DETECTED: ${reason}. Stopping all local Codex sessions.`);
+        log(`STOP CONDITION MET: ${reason}. Stopping all local Codex sessions.`);
         stopCodex();
         return;
       }
@@ -221,6 +240,6 @@ async function main(queryOnly = process.argv.includes('--once')) {
   }
 }
 
-module.exports = { getSnapshot, resetReason, main, logPath, polling, setIntervalMs, waitForNextQuery,
+module.exports = { setMinRemaining, stopReason, getSnapshot, resetReason, main, logPath, polling, setIntervalMs, waitForNextQuery,
   quotaParams, quotaError, retryAfterMs, recordFailure, recordSuccess, queryDeadline, requestRefresh };
 if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1; });
