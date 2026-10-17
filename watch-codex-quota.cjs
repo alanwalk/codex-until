@@ -61,10 +61,14 @@ function setIntervalMs(intervalMs) {
   if (reschedule) reschedule(Date.now() + intervalMs);
 }
 
-function setMinRemaining(value) {
+function validateMinRemaining(value) {
   if (value !== null && (!Number.isFinite(value) || value < 0 || value > 100)) {
     throw new Error('Minimum remaining percentage must be between 0 and 100');
   }
+}
+
+function setMinRemaining(value) {
+  validateMinRemaining(value);
   polling.minRemaining = value;
   requestRefresh();
 }
@@ -226,6 +230,11 @@ async function main(queryOnly = process.argv.includes('--once')) {
       if (reason) {
         log(`STOP CONDITION MET: ${reason}. Stopping all local Codex sessions.`);
         stopCodex();
+        polling.stoppedAt = Date.now();
+        polling.querying = false;
+        polling.completed = true;
+        polling.stopReason = reason;
+        fs.writeFileSync(logPath + '.result.json', JSON.stringify({ ...polling, running: false, logPath }));
         return;
       }
       previous = current;
@@ -240,6 +249,6 @@ async function main(queryOnly = process.argv.includes('--once')) {
   }
 }
 
-module.exports = { setMinRemaining, stopReason, getSnapshot, resetReason, main, logPath, polling, setIntervalMs, waitForNextQuery,
+module.exports = { validateMinRemaining, setMinRemaining, stopReason, getSnapshot, resetReason, main, logPath, polling, setIntervalMs, waitForNextQuery,
   quotaParams, quotaError, retryAfterMs, recordFailure, recordSuccess, queryDeadline, requestRefresh };
 if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1; });

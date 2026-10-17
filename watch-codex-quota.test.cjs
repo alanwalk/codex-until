@@ -225,14 +225,20 @@ async function checkThresholdConfirmation() {
   const fakeProcess = new EventEmitter();
   Object.assign(fakeProcess, { stdin: input, stdout: output, env: { NO_COLOR: '1' } });
   const terminalModule = { exports: {} };
+  let refreshPanel;
   require('node:vm').runInNewContext(require('node:fs').readFileSync(require.resolve('./bin/terminal.cjs'), 'utf8'), {
     module: terminalModule,
     require: name => name === 'node:readline' ? { emitKeypressEvents() {} } : require(name),
-    process: fakeProcess, console: { log() {} }, setInterval: () => 1, clearInterval() {},
+    process: fakeProcess, console: { log() {} }, setInterval: callback => { refreshPanel = callback; return 1; }, clearInterval() {},
   });
   const requests = [];
   let state = { running: true, minRemaining: 20, quota: null };
   const session = terminalModule.exports.consoleMode({
+    restart: async value => {
+      requests.push(`restart:${value}`);
+      state = { running: true, minRemaining: value, quota: null, logPath: '/new-monitor.log' };
+      return state;
+    },
     status: async () => state,
     request: async action => {
       requests.push(action);
@@ -267,8 +273,49 @@ async function checkThresholdConfirmation() {
   input.emit('keypress', '', { name: 'return' });
   await settle();
   assert.equal(requests.at(-1), 'min-remaining:10');
+  state = { ...state, running: false, completed: true, stoppedAt: Date.parse('2026-10-17T07:30:45Z'), stopReason: 'primary: remaining 10% <= 10%' };
+  let sessionFinished = false;
+  session.then(() => { sessionFinished = true; });
+  await refreshPanel();
+  await settle();
+  assert.equal(sessionFinished, false);
+  assert.ok(panelOutput.includes('已达到额度要求'));
+  assert.ok(panelOutput.includes('已停止本机全部 Codex'));
+  assert.ok(panelOutput.includes('终止时间'));
+  assert.ok(panelOutput.includes(new Date(state.stoppedAt).toLocaleString('zh-CN', { hour12: false })));
+  assert.ok(!panelOutput.includes('正在查询'));
+  const countBeforeRestart = requests.length;
+  input.emit('keypress', '5', {});
+  assert.equal(requests.length, countBeforeRestart);
+  input.emit('keypress', '', { name: 'return' });
+  await settle();
+  assert.equal(requests.at(-1), 'restart:5');
+  assert.ok(panelOutput.includes('正在监控'));
+  assert.ok(!panelOutput.includes('终止时间'));
+  await refreshPanel();
+  assert.ok(panelOutput.includes('正在监控'));
+  assert.equal(sessionFinished, false);
   input.emit('keypress', 'b', {});
   await session;
   console.log('Terminal arrow, reset and numeric drafts only submit on Enter passed.');
 }
 checkThresholdConfirmation().catch(error => { console.error(error); process.exitCode = 1; });
+
+const { readMinRemaining, saveMinRemaining } = require('./bin/cli.cjs');
+const settingsDirectory = require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'until-settings-'));
+const settingsPath = require('node:path').join(settingsDirectory, 'settings.json');
+try {
+  assert.equal(readMinRemaining(settingsPath), null);
+  for (const requirement of [10, 0, 100, 12.5, null]) {
+    saveMinRemaining(settingsPath, requirement);
+    assert.equal(readMinRemaining(settingsPath), requirement);
+  }
+  saveMinRemaining(settingsPath, 20);
+  assert.throws(() => saveMinRemaining(settingsPath, -1));
+  assert.equal(readMinRemaining(settingsPath), 20);
+  require('node:fs').writeFileSync(settingsPath, '{broken');
+  assert.throws(() => readMinRemaining(settingsPath), /Cannot read saved/);
+} finally {
+  require('node:fs').rmSync(settingsDirectory, { recursive: true, force: true });
+}
+console.log('Saved quota requirement round trips, reset mode and invalid settings checks passed.');

@@ -25,13 +25,41 @@ function request(action) {
 async function status() {
   try { return await request('status'); }
   catch (error) {
-    if (['ENOENT', 'ECONNREFUSED'].includes(error.code)) return { running: false, logPath: watch.logPath };
+    if (['ENOENT', 'ECONNREFUSED'].includes(error.code)) {
+      const lastLog = latestLog(runtimePaths().logDirectory);
+      if (lastLog && fs.existsSync(lastLog + '.result.json')) {
+        return JSON.parse(fs.readFileSync(lastLog + '.result.json', 'utf8'));
+      }
+      return { running: false, logPath: watch.logPath };
+    }
     throw error;
   }
 }
 
+function readMinRemaining(settingsPath) {
+  try {
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    watch.validateMinRemaining(settings.minRemaining);
+    return settings.minRemaining;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw new Error(`Cannot read saved quota requirement: ${error.message}`);
+  }
+}
+
+function saveMinRemaining(settingsPath, value) {
+  watch.validateMinRemaining(value);
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  const temporaryPath = settingsPath + '.tmp';
+  fs.writeFileSync(temporaryPath, JSON.stringify({ minRemaining: value }) + '\n');
+  fs.renameSync(temporaryPath, settingsPath);
+}
+
 async function daemon(minRemaining) {
-  if (minRemaining !== undefined) watch.setMinRemaining(minRemaining);
+  const settingsPath = path.join(runtimePaths().logDirectory, 'settings.json');
+  if (minRemaining === undefined) minRemaining = readMinRemaining(settingsPath);
+  else saveMinRemaining(settingsPath, minRemaining);
+  watch.setMinRemaining(minRemaining);
   let ownsSocket = false;
   let staleSocketRetried = false;
   const server = net.createServer(socket => {
@@ -47,7 +75,11 @@ async function daemon(minRemaining) {
       }
       if (action.startsWith('min-remaining:')) {
         const value = action.slice('min-remaining:'.length);
-        try { watch.setMinRemaining(value === 'reset' ? null : Number(value)); }
+        try {
+          const requirement = value === 'reset' ? null : Number(value);
+          saveMinRemaining(settingsPath, requirement);
+          watch.setMinRemaining(requirement);
+        }
         catch (error) { socket.end(JSON.stringify({ error: error.message }) + '\n'); return; }
       }
       const result = { running: action !== 'stop', pid: process.pid, logPath: watch.logPath,
@@ -113,6 +145,39 @@ function parseOptions(args, interactive) {
   return options;
 }
 
+async function startMonitor(minRemaining) {
+  const monitorLogPath = runtimePaths().logPath;
+  fs.mkdirSync(path.dirname(monitorLogPath), { recursive: true });
+  const output = fs.openSync(monitorLogPath, 'a');
+  const daemonArgs = [__filename, '--daemon'];
+  if (minRemaining !== undefined) daemonArgs.push('--min-remaining', String(minRemaining));
+  const child = spawn(process.execPath, daemonArgs, {
+    detached: true, windowsHide: true, stdio: ['ignore', 'ignore', output],
+    env: { ...process.env, CODEX_UNTIL_LOG_PATH: monitorLogPath },
+  });
+  fs.closeSync(output);
+  child.on('error', error => { console.error(error.message); process.exitCode = 1; });
+  child.unref();
+  for (let attempt = 0; attempt < 50; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const result = await status();
+    if (result.running || result.completed && result.logPath === monitorLogPath) return result;
+  }
+  throw new Error(`Monitor failed to start. See ${monitorLogPath}`);
+}
+
+async function restartMonitor(minRemaining) {
+  const settingsPath = path.join(runtimePaths().logDirectory, 'settings.json');
+  saveMinRemaining(settingsPath, minRemaining);
+  const existing = await status();
+  if (existing.running) {
+    const result = await request(`min-remaining:${minRemaining === null ? 'reset' : minRemaining}`);
+    if (result.error) throw new Error(result.error);
+    return result;
+  }
+  return startMonitor();
+}
+
 async function main() {
   const { action, foreground, minRemaining } = parseOptions(process.argv.slice(2), Boolean(process.stdin.isTTY && process.stdout.isTTY));
   if (['help', '--help', '-h'].includes(action)) {
@@ -158,35 +223,17 @@ Restarting the monitor establishes a fresh baseline. No baseline is persisted.`)
       if (configured.error) throw new Error(configured.error);
       if (configured.minRemaining !== minRemaining) throw new Error('当前后台版本不支持百分比设置，请先 stop，再重新启动。');
     }
-    if (foreground) await consoleMode({ status, request, logPath: watch.logPath });
+    if (foreground) await consoleMode({ status, request, restart: restartMonitor, logPath: watch.logPath });
     else {
       const refreshed = await request('refresh');
       console.log(JSON.stringify({ ...refreshed, quota: null, changed: false }));
     }
     return;
   }
-  fs.mkdirSync(path.dirname(watch.logPath), { recursive: true });
-  const output = fs.openSync(watch.logPath, 'a');
-  const daemonArgs = [__filename, '--daemon'];
-  if (minRemaining !== undefined) daemonArgs.push('--min-remaining', String(minRemaining));
-  const child = spawn(process.execPath, daemonArgs, {
-    detached: true, windowsHide: true, stdio: ['ignore', 'ignore', output],
-    env: { ...process.env, CODEX_UNTIL_LOG_PATH: watch.logPath },
-  });
-  fs.closeSync(output);
-  child.on('error', error => { console.error(error.message); process.exitCode = 1; });
-  child.unref();
-  for (let attempt = 0; attempt < 50; attempt++) {
-    await new Promise(resolve => setTimeout(resolve, 100));
-    const result = await status();
-    if (result.running) {
-      if (foreground) await consoleMode({ status, request, logPath: watch.logPath });
-      else console.log(JSON.stringify({ ...result, changed: true }));
-      return;
-    }
-  }
-  throw new Error(`Monitor failed to start. See ${watch.logPath}`);
+  const result = await startMonitor(minRemaining);
+  if (foreground) await consoleMode({ status, request, restart: restartMonitor, logPath: result.logPath });
+  else console.log(JSON.stringify({ ...result, changed: true }));
 }
 
-module.exports = { parseOptions };
+module.exports = { parseOptions, readMinRemaining, saveMinRemaining };
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
