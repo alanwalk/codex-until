@@ -212,3 +212,63 @@ assert.ok(thresholdPanel.includes('❯ 最小剩余'));
 assert.ok(thresholdPanel.includes('≤ 10%'));
 assert.ok(renderPanel({ running: true, lines: [], color: false }).includes('重置时结束'));
 console.log('Minimum remaining threshold, CLI validation and panel checks passed.');
+
+async function checkThresholdConfirmation() {
+  const { EventEmitter } = require('node:events');
+  const input = new EventEmitter();
+  input.setRawMode = () => {};
+  input.resume = () => {};
+  input.pause = () => {};
+  const output = new EventEmitter();
+  let panelOutput = '';
+  output.write = text => { panelOutput = text; };
+  const fakeProcess = new EventEmitter();
+  Object.assign(fakeProcess, { stdin: input, stdout: output, env: { NO_COLOR: '1' } });
+  const terminalModule = { exports: {} };
+  require('node:vm').runInNewContext(require('node:fs').readFileSync(require.resolve('./bin/terminal.cjs'), 'utf8'), {
+    module: terminalModule,
+    require: name => name === 'node:readline' ? { emitKeypressEvents() {} } : require(name),
+    process: fakeProcess, console: { log() {} }, setInterval: () => 1, clearInterval() {},
+  });
+  const requests = [];
+  let state = { running: true, minRemaining: 20, quota: null };
+  const session = terminalModule.exports.consoleMode({
+    status: async () => state,
+    request: async action => {
+      requests.push(action);
+      if (action.startsWith('min-remaining:')) {
+        const value = action.slice('min-remaining:'.length);
+        state = { ...state, minRemaining: value === 'reset' ? null : Number(value) };
+      }
+      return { ...state, requiredSequence: 1 };
+    },
+  });
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  await settle();
+  input.emit('keypress', '', { name: 'down' });
+  input.emit('keypress', '', { name: 'right' });
+  input.emit('keypress', '', { name: 'right' });
+  input.emit('keypress', '', { name: 'left' });
+  assert.deepEqual(requests, ['refresh']);
+  assert.ok(panelOutput.includes('21%（未保存）'));
+  assert.ok(panelOutput.includes('≤ 20%'));
+  input.emit('keypress', '', { name: 'return' });
+  await settle();
+  assert.deepEqual(requests, ['refresh', 'min-remaining:21']);
+  assert.ok(!panelOutput.includes('未保存'));
+  input.emit('keypress', 'r', {});
+  assert.equal(requests.length, 2);
+  input.emit('keypress', '', { name: 'return' });
+  await settle();
+  assert.equal(requests.at(-1), 'min-remaining:reset');
+  input.emit('keypress', '1', {});
+  input.emit('keypress', '0', {});
+  assert.equal(requests.length, 3);
+  input.emit('keypress', '', { name: 'return' });
+  await settle();
+  assert.equal(requests.at(-1), 'min-remaining:10');
+  input.emit('keypress', 'b', {});
+  await session;
+  console.log('Terminal arrow, reset and numeric drafts only submit on Enter passed.');
+}
+checkThresholdConfirmation().catch(error => { console.error(error); process.exitCode = 1; });

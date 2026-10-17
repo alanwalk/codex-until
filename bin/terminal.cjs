@@ -59,7 +59,12 @@ function renderPanel({ running, pid, lines, selected = 0, columns = 80, color = 
   output.push('', paint('90', `  ${stopDescription}，结束本机全部 Codex 会话。`), '');
   if (!showMenu) return output.join('\n');
   const choices = intervalLabels.map((label, index) => intervals[index] === intervalMs ? `[${label}]` : label).join('  ');
-  for (const [index, label] of [`刷新间隔  ‹ ${choices} ›`, `最小剩余  ‹ ${minRemaining === null ? '重置时结束' : minRemaining + '%'} ›${thresholdInput ? '  输入: ' + thresholdInput : ''}（数字+回车 / r 恢复重置）`, '转入后台，继续监控', '停止监控并退出'].entries()) {
+  let thresholdLabel = minRemaining === null ? '重置时结束' : `${minRemaining}%`;
+  if (thresholdInput) {
+    const draftLabel = thresholdInput === 'reset' ? '重置时结束' : `${thresholdInput}%`;
+    thresholdLabel = `${draftLabel}（未保存）`;
+  }
+  for (const [index, label] of [`刷新间隔  ‹ ${choices} ›`, `最小剩余  ‹ ${thresholdLabel} ›（回车保存 / r 恢复重置）`, '转入后台，继续监控', '停止监控并退出'].entries()) {
     output.push(index === selected ? paint('1;36', `  ❯ ${label}`) : paint('90', `    ${label}`));
   }
   output.push('');
@@ -152,15 +157,28 @@ async function consoleMode({ status, request, logPath }) {
       else if (key.name === 'down') { selected = (selected + 1) % 4; draw(); }
       else if (selected === 0 && key.name === 'left') void changeInterval(-1);
       else if (selected === 0 && key.name === 'right') void changeInterval(1);
-      else if (selected === 1 && /^[0-9.]$/.test(text || '')) { thresholdInput += text; draw(); }
-      else if (selected === 1 && key.name === 'backspace') { thresholdInput = thresholdInput.slice(0, -1); draw(); }
-      else if (selected === 1 && key.name === 'return' && thresholdInput) void changeThreshold(Number(thresholdInput));
-      else if (selected === 1 && text === 'r') void changeThreshold(null);
-      else if (selected === 1 && key.name === 'left') {
-        const value = current.minRemaining;
-        void changeThreshold(value == null || value <= 0 ? null : Math.max(0, value - 1));
+      else if (selected === 1 && /^[0-9.]$/.test(text || '')) {
+        if (thresholdInput === 'reset') thresholdInput = '';
+        thresholdInput += text;
+        draw();
       }
-      else if (selected === 1 && key.name === 'right') void changeThreshold(Math.min(100, (current.minRemaining ?? -1) + 1));
+      else if (selected === 1 && key.name === 'backspace') { thresholdInput = thresholdInput.slice(0, -1); draw(); }
+      else if (selected === 1 && key.name === 'return' && thresholdInput) {
+        const value = thresholdInput === 'reset' ? null : Number(thresholdInput);
+        void changeThreshold(value);
+      }
+      else if (selected === 1 && text === 'r') { thresholdInput = 'reset'; draw(); }
+      else if (selected === 1 && ['left', 'right'].includes(key.name)) {
+        let value = current.minRemaining ?? null;
+        if (thresholdInput === 'reset') value = null;
+        else if (thresholdInput) value = Number(thresholdInput);
+        if (key.name === 'left') {
+          thresholdInput = value === null || value <= 0 ? 'reset' : String(Math.max(0, value - 1));
+        } else {
+          thresholdInput = String(Math.min(100, (value ?? -1) + 1));
+        }
+        draw();
+      }
       else if (key.name === 'return' && selected >= 2) void finish(selected === 3);
       else if (text === 'b') void finish(false);
       else if (text === 'q' || (key.ctrl && key.name === 'c')) void finish(true);
